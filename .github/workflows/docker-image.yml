@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
- 
 
 env:
   DOCKER_IMAGE: web-application-gitaction
@@ -35,18 +34,19 @@ jobs:
         working-directory: ./Terraform
         run: |
           terraform init
+          terraform import aws_key_pair.mykeyname mykeyname || echo "Key pair exists"
+          terraform import aws_ecr_repository.my_ecr_repo my-ecr-repo || echo "ECR exists"
+          terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "IAM role exists"
+          terraform import aws_iam_instance_profile.ec2_cloudwatch_profile ec2_cloudwatch_profile || echo "Instance profile exists"
           terraform apply -auto-approve
 
       - name: Get Terraform Outputs
         id: tf_output
         working-directory: ./Terraform
         run: |
-          TERRAFORM_ECR_URI=$(terraform output -raw ecr_uri)
-          echo "TERRAFORM_ECR_URI=$TERRAFORM_ECR_URI" >> $GITHUB_OUTPUT
-          MASTER_IP=$(terraform output -raw master_public_ip)
-          echo "MASTER_IP=$MASTER_IP" >> $GITHUB_OUTPUT
-          WORKER_IPS=$(terraform output -json worker_public_ips)
-          echo "WORKER_IPS=$WORKER_IPS" >> $GITHUB_OUTPUT
+          echo "TERRAFORM_ECR_URI=$(terraform output -raw ecr_uri)" >> $GITHUB_OUTPUT
+          echo "MASTER_IP=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
+          echo "WORKER_IPS=$(terraform output -json worker_public_ips)" >> $GITHUB_OUTPUT
 
   docker-build-push:
     runs-on: ubuntu-latest
@@ -66,7 +66,7 @@ jobs:
         run: |
           TERRAFORM_URI=${{ needs.terraform.outputs.TERRAFORM_ECR_URI }}
           aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
-            docker login --username AWS $TERRAFORM_URI --password-stdin
+            docker login --username AWS --password-stdin $TERRAFORM_URI
 
       - name: Build Docker image
         working-directory: ./app
