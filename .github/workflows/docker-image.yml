@@ -97,9 +97,10 @@ jobs:
 
       - name: Install Ansible and dependencies
         run: |
-          sudo yum update -y || sudo apt-get update -y
-          sudo yum install -y ansible sshpass jq netcat-openbsd || sudo apt-get install -y ansible sshpass jq netcat
-          pip install boto3
+            sudo yum update -y
+            sudo yum install -y ansible sshpass jq netcat-openbsd python3-pip
+            pip3 install --user boto3
+
 
       - name: Add SSH Key
         run: |
