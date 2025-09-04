@@ -10,7 +10,6 @@ env:
   DOCKER_IMAGE: web-application-gitaction
 
 jobs:
-
   terraform-and-build:
     runs-on: ubuntu-latest
     outputs:
@@ -20,10 +19,10 @@ jobs:
       ECR_DYNAMIC_URI: ${{ steps.ecr_dynamic.outputs.ECR_DYNAMIC_URI }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v3
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -44,24 +43,33 @@ jobs:
       - name: Create dynamic ECR if not exists
         id: ecr_dynamic
         run: |
-          aws ecr describe-repositories --repository-names $DOCKER_IMAGE || \
-          aws ecr create-repository --repository-name $DOCKER_IMAGE
-          ECR_DYNAMIC_URI=$(aws ecr describe-repositories --repository-names $DOCKER_IMAGE --query "repositories[0].repositoryUri" --output text)
-          echo "ECR_DYNAMIC_URI=$ECR_DYNAMIC_URI" >> $GITHUB_OUTPUT
+          # Check if repo exists, create if not
+          aws ecr describe-repositories --repository-names $DOCKER_IMAGE --region ${{ secrets.AWS_REGION }} || \
+            aws ecr create-repository --repository-name $DOCKER_IMAGE --region ${{ secrets.AWS_REGION }}
+
+          # Extract URI
+          ECR_DYNAMIC_URI=$(aws ecr describe-repositories \
+            --repository-names $DOCKER_IMAGE \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'repositories[0].repositoryUri' \
+            --output text)
+
+          echo "ECR_DYNAMIC_URI=$ECR_DYNAMIC_URI" >> "$GITHUB_OUTPUT"
+          echo "Dynamic ECR URI: $ECR_DYNAMIC_URI"
 
       - name: Terraform Apply
         working-directory: ./Terraform
         run: terraform apply -auto-approve
 
-      - name: Get Terraform ECR URI and EC2 IPs
+      - name: Get Terraform Outputs
         id: tf_output
-        working-directory: ./Terraform
         run: |
-          TERRAFORM_ECR_URI=$(terraform output -raw ecr_uri)
+          TERRAFORM_ECR_URI=$(terraform -chdir=./Terraform output -raw ecr_uri)
+          MASTER_IP=$(terraform -chdir=./Terraform output -raw master_public_ip)
+          WORKER_IPS=$(terraform -chdir=./Terraform output -json worker_public_ips)
+
           echo "TERRAFORM_ECR_URI=$TERRAFORM_ECR_URI" >> "$GITHUB_OUTPUT"
-          MASTER_IP=$(terraform output -raw master_public_ip)
           echo "MASTER_IP=$MASTER_IP" >> "$GITHUB_OUTPUT"
-          WORKER_IPS=$(terraform output -json worker_public_ips)
           echo "WORKER_IPS=$WORKER_IPS" >> "$GITHUB_OUTPUT"
 
   dockerbuild-push:
@@ -69,10 +77,10 @@ jobs:
     needs: terraform-and-build
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v3
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -83,86 +91,97 @@ jobs:
           echo "Dynamic ECR URI: ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}"
           echo "Terraform ECR URI: ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}"
 
-      - name: Log in to ECRs
+      - name: Log in to AWS ECR
+        env:
+          DYNAMIC_URI: ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}
+          TERRAFORM_URI: ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
         run: |
-          DYNAMIC_URI=${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}
-          TERRAFORM_URI=${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
-
           if [[ -z "$DYNAMIC_URI" || -z "$TERRAFORM_URI" ]]; then
-            echo "ECR URIs are empty. Exiting."
+            echo "❌ One or more ECR URIs are empty."
             exit 1
           fi
 
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS $DYNAMIC_URI --password-stdin
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS $TERRAFORM_URI --password-stdin
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $DYNAMIC_URI
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $TERRAFORM_URI
 
-      - name: Build Docker image
+      - name: Build Docker Image
         working-directory: ./app
-        run: docker build -t $DOCKER_IMAGE:latest .
-
-      - name: Push to dynamic ECR
         run: |
-          docker tag $DOCKER_IMAGE:latest ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}:latest
-          docker push ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}:latest
+          docker build -t $DOCKER_IMAGE:latest .
 
-      - name: Push to Terraform ECR
+      - name: Tag and Push to Dynamic ECR
+        env:
+          ECR_URI: ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}
         run: |
-          docker tag $DOCKER_IMAGE:latest ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}:latest
-          docker push ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}:latest
+          docker tag $DOCKER_IMAGE:latest $ECR_URI:latest
+          docker push $ECR_URI:latest
+
+      - name: Tag and Push to Terraform-Created ECR
+        env:
+          ECR_URI: ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
+        run: |
+          docker tag $DOCKER_IMAGE:latest $ECR_URI:latest
+          docker push $ECR_URI:latest
 
   ansible_deploy:
     needs: dockerbuild-push
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
-      - name: Install Ansible and dependencies
+      - name: Install Dependencies
         run: |
-          sudo yum update -y
-          sudo yum install -y ansible sshpass jq netcat-openbsd python3-pip
-          pip3 install --user boto3
+          sudo apt-get update
+          sudo apt-get install -y sshpass jq nmap-ncat
+          pip3 install --user ansible boto3
 
       - name: Add SSH Key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+        uses: ssh-action/setup-ssh@v0.2.0
+        with:
+          host: ${{ needs.terraform-and-build.outputs.MASTER_IP }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts_required: false
+          ssh_config: |
+            Host master worker*
+              StrictHostKeyChecking no
+              UserKnownHostsFile=/dev/null
 
-      - name: Create Inventory
+      - name: Create Ansible Inventory
         run: |
-          echo "[master]" > inventory
-          echo "${{ needs.terraform-and-build.outputs.MASTER_IP }} ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
-          echo "[workers]" >> inventory
-          for ip in $(echo '${{ needs.terraform-and-build.outputs.WORKER_IPS }}' | jq -r '.[]'); do
-            echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
+          MASTER_IP="${{ needs.terraform-and-build.outputs.MASTER_IP }}"
+          WORKER_IPS='${{ needs.terraform-and-build.outputs.WORKER_IPS }}'
+
+          echo "[master]" > inventory.ini
+          echo "$MASTER_IP ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+
+          echo "[workers]" >> inventory.ini
+          echo "$WORKER_IPS" | jq -r '.[]' | while read ip; do
+            echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
           done
 
-      - name: Ansible Config
-        run: |
-          echo "[defaults]" > ansible.cfg
-          echo "host_key_checking = False" >> ansible.cfg
-          echo "inventory = ./inventory" >> ansible.cfg
+          echo "[all:vars]" >> inventory.ini
+          echo "ansible_python_interpreter=/usr/bin/python3" >> inventory.ini
 
-      - name: Install Python 3.8 on all nodes
-        run: |
-          ansible all -i inventory -m raw -a "sudo amazon-linux-extras enable python3.8 && sudo yum install -y python3.8" -u ec2-user --private-key ~/.ssh/id_rsa
+          cat inventory.ini
 
-      - name: Update inventory to use Python 3.8
+      - name: Install Python 3.8 on EC2 Instances
         run: |
-          sed -i 's|ansible_ssh_private_key_file|ansible_python_interpreter=/usr/bin/python3.8 ansible_ssh_private_key_file|' inventory
+          ansible all -i inventory.ini -m raw -a "sudo amazon-linux-extras enable python3.8 -y && sudo yum install -y python38"
 
-      - name: Run Master Script via SSH
+      - name: Update Ansible inventory to use Python 3.8
         run: |
-          ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.terraform-and-build.outputs.MASTER_IP }} 'bash -s' < ./Ansible/master.sh
+          sed -i 's|ansible_python_interpreter=/usr/bin/python3|ansible_python_interpreter=/usr/bin/python3.8|' inventory.ini
 
-      - name: Run Worker Script via SSH
+      - name: Run Master Playbook
         run: |
-          for ip in $(echo '${{ needs.terraform-and-build.outputs.WORKER_IPS }}' | jq -r '.[]'); do
-            ssh -i ~/.ssh/id_rsa ec2-user@$ip 'bash -s' < ./Ansible/worker.sh
-          done
+          ansible-playbook -i inventory.ini ./Ansible/master.yml
+
+      - name: Run Worker Playbook
+        run: |
+          ansible-playbook -i inventory.ini ./Ansible/worker.yml
