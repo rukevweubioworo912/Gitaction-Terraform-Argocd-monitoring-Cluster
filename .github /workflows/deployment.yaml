@@ -4,14 +4,14 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 env:
-  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
   DOCKER_IMAGE: web-application
   DOCKER_REGISTRY: docker.io
 
 jobs:
+ 
   build-and-push:
     runs-on: ubuntu-latest
     steps:
@@ -21,8 +21,8 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ env.DOCKER_PASSWORD }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build Docker image
         working-directory: ./k8Cluster/app
@@ -30,9 +30,10 @@ jobs:
 
       - name: Tag and Push Docker image
         run: |
-          docker tag $DOCKER_IMAGE:latest $DOCKER_USERNAME/$DOCKER_IMAGE:latest
-          docker push $DOCKER_USERNAME/$DOCKER_IMAGE:latest
+          docker tag $DOCKER_IMAGE:latest ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
 
+  
   deploy-terraform:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -45,7 +46,7 @@ jobs:
       worker_ips: ${{ steps.tf_output.outputs.worker_ips }}
     steps:
       - name: Checkout Terraform code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -53,21 +54,6 @@ jobs:
       - name: Terraform Init
         working-directory: ./k8Cluster/Terraform
         run: terraform init
-
-      - name: Terraform Import EC2 Key Pair
-        working-directory: ./k8Cluster/Terraform
-        run: |
-          terraform import aws_key_pair.mykeyname mykeyname || echo "Key pair already imported"
-
-      - name: Terraform Import IAM Instance Profile
-        working-directory: ./k8Cluster/Terraform
-        run: |
-          terraform import aws_iam_instance_profile.ec2_cloudwatch_profile ec2_cloudwatch_profile || echo "Instance profile already imported"
-
-      - name: Terraform Import IAM Role
-        working-directory: ./k8Cluster/Terraform
-        run: |
-          terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "IAM role already imported"
 
       - name: Terraform Apply
         working-directory: ./k8Cluster/Terraform
@@ -80,11 +66,12 @@ jobs:
           echo "master_ip=$(terraform output -raw master_public_ip)" >> "$GITHUB_OUTPUT"
           echo "worker_ips=$(terraform output -json worker_public_ips)" >> "$GITHUB_OUTPUT"
 
+
   ansible_deploy:
     needs: deploy-terraform
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout source code
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -92,10 +79,10 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install Ansible and Dependencies
+      - name: Install Ansible and dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ansible sshpass  jq netcat-openbsd
+          sudo yum update -y || sudo apt-get update -y
+          sudo yum install -y ansible sshpass jq netcat-openbsd || sudo apt-get install -y ansible sshpass jq netcat
           pip install boto3
 
       - name: Add SSH Key
@@ -104,7 +91,7 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      - name: Create Inventory for Master and Workers
+      - name: Create Inventory
         run: |
           echo "[master]" > inventory
           echo "${{ needs.deploy-terraform.outputs.master_ip }} ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
@@ -120,30 +107,22 @@ jobs:
           echo "host_key_checking = False" >> ansible.cfg
           echo "inventory = ./inventory" >> ansible.cfg
 
-      
       - name: Install Python 3.8 on all nodes
         run: |
           ansible all -i inventory -m raw -a "sudo amazon-linux-extras enable python3.8 && sudo yum install -y python3.8" -u ec2-user --private-key ~/.ssh/id_rsa
 
       - name: Update inventory to use Python 3.8
         run: |
-           sed -i 's|ansible_ssh_private_key_file|ansible_python_interpreter=/usr/bin/python3.8 ansible_ssh_private_key_file|' inventory
+          sed -i 's|ansible_ssh_private_key_file|ansible_python_interpreter=/usr/bin/python3.8 ansible_ssh_private_key_file|' inventory
 
-      - name: Run Ansible Playbook on Master
-        id: run_master
+      - name: Run Master Script via SSH
         run: |
-          ansible-playbook -i inventory ./k8Cluster/Ansible/master.yaml --extra-vars "output_file=/tmp/master_output.json"
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
+          ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.deploy-terraform.outputs.master_ip }} 'bash -s' < ./Ansible/master.sh
 
-      - name: Get Join Command from Master
-        id: master_output
+     
+      - name: Run workerscript Script via SSH
         run: |
-          MASTER_JOIN=$(ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.deploy-terraform.outputs.master_ip }} "cat /tmp/kubeadm_join.sh")
-          echo "master_join=$MASTER_JOIN" >> "$GITHUB_OUTPUT"
+          ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.deploy-terraform.outputs.worker_ips }} 'bash -s' < ./Ansible/worker.sh
 
-      - name: Run Ansible Playbook on Workers
-        run: |
-          ansible-playbook -i inventory ./k8Cluster/Ansible/worker.yaml --extra-vars "master_join='${{ steps.master_output.outputs.master_join }}'"
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
+     
+  
