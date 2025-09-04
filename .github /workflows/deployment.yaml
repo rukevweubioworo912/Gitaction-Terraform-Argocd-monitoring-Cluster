@@ -147,15 +147,3 @@ jobs:
           ansible-playbook -i inventory ./k8Cluster/Ansible/worker.yaml --extra-vars "master_join='${{ steps.master_output.outputs.master_join }}'"
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
-
-      - name: Verify Kubernetes cluster nodes are Ready
-        run: |
-          echo "Waiting for all Kubernetes nodes to be Ready..."
-          MASTER_IP=${{ needs.deploy-terraform.outputs.master_ip }}
-          until ssh -i ~/.ssh/id_rsa ec2-user@$MASTER_IP "kubectl get nodes --no-headers | awk '{print \$2}' | grep -q 'Ready'" ; do
-            echo "Nodes not Ready yet, waiting 10s..."
-            sleep 10
-          done
-          echo "All nodes are Ready!"
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
