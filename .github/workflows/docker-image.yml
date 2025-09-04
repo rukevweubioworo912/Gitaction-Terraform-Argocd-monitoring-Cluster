@@ -32,16 +32,14 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-
       - name: Terraform Import Existing Resources
         working-directory: ./Terraform
         run: |
-          terraform init 
+          terraform init
           terraform import aws_key_pair.mykeyname mykeyname || echo "Key pair exists"
           terraform import aws_ecr_repository.my_ecr_repo my-ecr-repo || echo "ECR exists"
           terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "IAM role exists"
           terraform import aws_iam_instance_profile.ec2_cloudwatch_profile ec2_cloudwatch_profile || echo "Instance profile exists"
-
 
       - name: Create dynamic ECR if not exists
         id: ecr_dynamic
@@ -70,7 +68,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: terraform-and-build
     steps:
-      
       - name: Checkout source code
         uses: actions/checkout@v3
 
@@ -81,12 +78,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Log in to both ECRs
+      - name: Debug ECR URIs
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
-            docker login --username AWS --password-stdin ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
-            docker login --username AWS --password-stdin ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
+          echo "Dynamic ECR URI: ${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}"
+          echo "Terraform ECR URI: ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}"
+
+      - name: Log in to ECRs
+        run: |
+          DYNAMIC_URI=${{ needs.terraform-and-build.outputs.ECR_DYNAMIC_URI }}
+          TERRAFORM_URI=${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
+
+          if [[ -z "$DYNAMIC_URI" || -z "$TERRAFORM_URI" ]]; then
+            echo "ECR URIs are empty. Exiting."
+            exit 1
+          fi
+
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS $DYNAMIC_URI --password-stdin
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS $TERRAFORM_URI --password-stdin
 
       - name: Build Docker image
         working-directory: ./app
