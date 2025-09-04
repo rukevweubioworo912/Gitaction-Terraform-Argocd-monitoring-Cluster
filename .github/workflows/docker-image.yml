@@ -1,4 +1,4 @@
-name: Build, Push Docker Image & Deploy Kubernetes Cluster
+name: Build, Push & Deploy Docker Image to Kubernetes
 
 on:
   push:
@@ -7,13 +7,11 @@ on:
  
 
 env:
-  LOCAL_IMAGE_NAME: web-app
-  ECR_REPO_NAME: my-ecr-repo
-  IMAGE_TAG: latest
+  DOCKER_IMAGE: web-application-gitaction
 
 jobs:
- 
-  terraform-and-build:
+
+  terraform:
     runs-on: ubuntu-latest
     outputs:
       TERRAFORM_ECR_URI: ${{ steps.tf_output.outputs.TERRAFORM_ECR_URI }}
@@ -21,10 +19,10 @@ jobs:
       WORKER_IPS: ${{ steps.tf_output.outputs.WORKER_IPS }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v3
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -33,144 +31,106 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Init and Import Existing Resources
+      - name: Terraform Init & Apply
         working-directory: ./Terraform
         run: |
-          terraform init || terraform init -reconfigure
+          terraform init
+          terraform apply -auto-approve
 
-        
-          terraform import aws_key_pair.mykeyname mykeyname || echo "→ Already managed or not found"
-
-          echo "Importing ECR repository..."
-          terraform import aws_ecr_repository.my_ecr_repo my-ecr-repo || echo "→ Already managed"
-
-          echo "Importing IAM role..."
-          terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "→ Already managed"
-
-          echo "Importing IAM instance profile..."
-          terraform import aws_iam_instance_profile.ec2_cloudwatch_profile ec2_cloudwatch_profile || echo "→ Already managed"
-
-      - name: Terraform Apply (No-op if no changes)
-        working-directory: ./Terraform
-        run: terraform apply -auto-approve
-
-      - name: Export Terraform Outputs
+      - name: Get Terraform Outputs
         id: tf_output
+        working-directory: ./Terraform
         run: |
-        
-          cd $GITHUB_WORKSPACE
+          TERRAFORM_ECR_URI=$(terraform output -raw ecr_uri)
+          echo "TERRAFORM_ECR_URI=$TERRAFORM_ECR_URI" >> $GITHUB_OUTPUT
+          MASTER_IP=$(terraform output -raw master_public_ip)
+          echo "MASTER_IP=$MASTER_IP" >> $GITHUB_OUTPUT
+          WORKER_IPS=$(terraform output -json worker_public_ips)
+          echo "WORKER_IPS=$WORKER_IPS" >> $GITHUB_OUTPUT
 
-          ECR_URI=$(terraform -chdir=./Terraform output -raw ecr_uri)
-          MASTER_IP=$(terraform -chdir=./Terraform output -raw master_public_ip)
-          WORKER_IPS=$(terraform -chdir=./Terraform output -json worker_public_ips)
-
-          echo "TERRAFORM_ECR_URI=$ECR_URI" >> "$GITHUB_OUTPUT"
-          echo "MASTER_IP=$MASTER_IP" >> "$GITHUB_OUTPUT"
-          echo "WORKER_IPS=$WORKER_IPS" >> "$GITHUB_OUTPUT"
-
-
-  dockerbuild-push:
+  docker-build-push:
     runs-on: ubuntu-latest
-    needs: terraform-and-build
+    needs: terraform
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v3
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Login to ECR
-        env:
-          ECR_URI: ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
+      - name: Log in to Terraform ECR
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
-            | docker login --username AWS --password-stdin $ECR_URI
+          TERRAFORM_URI=${{ needs.terraform.outputs.TERRAFORM_ECR_URI }}
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+            docker login --username AWS $TERRAFORM_URI --password-stdin
 
-      - name: Build Docker Image
+      - name: Build Docker image
+        working-directory: ./app
+        run: docker build -t $DOCKER_IMAGE:latest .
+
+      - name: Push Docker image to Terraform ECR
         run: |
-          docker build -t $LOCAL_IMAGE_NAME ./app
+          TERRAFORM_URI=${{ needs.terraform.outputs.TERRAFORM_ECR_URI }}
+          docker tag $DOCKER_IMAGE:latest $TERRAFORM_URI:latest
+          docker push $TERRAFORM_URI:latest
 
-      - name: Tag and Push to ECR
-        env:
-          ECR_URI: ${{ needs.terraform-and-build.outputs.TERRAFORM_ECR_URI }}
-        run: |
-          docker tag $LOCAL_IMAGE_NAME:latest $ECR_URI:$IMAGE_TAG
-          docker push $ECR_URI:$IMAGE_TAG
-
- 
-  ansible_deploy:
-    needs: dockerbuild-push
+  ansible-deploy:
+    needs: [docker-build-push, terraform]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.x'
 
-      - name: Install Ansible & Dependencies
+      - name: Install Ansible and dependencies
         run: |
-          sudo yum update -y
-          sudo yum install -y sshpass jq nmap-ncat
-          pip3 install --user ansible boto3
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          sudo apt-get update -y
+          sudo apt-get install -y ansible sshpass jq netcat-openbsd python3-pip
+          pip3 install boto3
 
-      - name: Add SSH Private Key
-        uses: ssh-action/setup-ssh@v0.2.0
-        with:
-          host: ${{ needs.terraform-and-build.outputs.MASTER_IP }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          known_hosts_required: false
-          ssh_config: |
-            Host *
-              StrictHostKeyChecking no
-              UserKnownHostsFile=/dev/null
-
-      - name: Create Ansible Inventory
+      - name: Add SSH Key
         run: |
-          MASTER_IP="${{ needs.terraform-and-build.outputs.MASTER_IP }}"
-          WORKER_IPS='${{ needs.terraform-and-build.outputs.WORKER_IPS }}'
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
 
-          echo "[master]" > inventory.ini
-          echo "$MASTER_IP ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_python_interpreter=/usr/bin/python3.8" >> inventory.ini
-
-          echo "[workers]" >> inventory.ini
-          echo "$WORKER_IPS" | jq -r '.[]' | while read ip; do
-            echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_python_interpreter=/usr/bin/python3.8" >> inventory.ini
+      - name: Create Inventory
+        run: |
+          echo "[master]" > inventory
+          echo "${{ needs.terraform.outputs.MASTER_IP }} ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
+          echo "[workers]" >> inventory
+          for ip in $(echo '${{ needs.terraform.outputs.WORKER_IPS }}' | jq -r '.[]'); do
+            echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
           done
 
-          echo "[all:children]" >> inventory.ini
-          echo "master" >> inventory.ini
-          echo "workers" >> inventory.ini
-
-          cat inventory.ini
-
-      - name: Wait for SSH Access
+      - name: Ansible Config
         run: |
-          set +e
-          for i in {1..12}; do
-            ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-                -i ~/.ssh/id_rsa ec2-user@${{ needs.terraform-and-build.outputs.MASTER_IP }} \
-                echo "SSH is UP" && exit 0
-            echo "Waiting for SSH... (attempt $i/12)"
-            sleep 10
+          echo "[defaults]" > ansible.cfg
+          echo "host_key_checking = False" >> ansible.cfg
+          echo "inventory = ./inventory" >> ansible.cfg
+
+      - name: Install Python 3.8 on all nodes
+        run: |
+          ansible all -i inventory -m raw -a "sudo amazon-linux-extras enable python3.8 && sudo yum install -y python3.8" -u ec2-user --private-key ~/.ssh/id_rsa
+
+      - name: Update inventory to use Python 3.8
+        run: |
+          sed -i 's|ansible_ssh_private_key_file|ansible_python_interpreter=/usr/bin/python3.8 ansible_ssh_private_key_file|' inventory
+
+      - name: Run Master Script via SSH
+        run: |
+          ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.terraform.outputs.MASTER_IP }} 'bash -s' < ./Ansible/master.sh
+
+      - name: Run Worker Script via SSH
+        run: |
+          for ip in $(echo '${{ needs.terraform.outputs.WORKER_IPS }}' | jq -r '.[]'); do
+            ssh -i ~/.ssh/id_rsa ec2-user@$ip 'bash -s' < ./Ansible/worker.sh
           done
-          echo "SSH connection failed after 12 attempts"
-          exit 1
-        shell: bash
-
-      - name: Run Master Playbook
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          ansible-playbook -i inventory.ini ./Ansible/master.yml
-
-      - name: Run Worker Playbook
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          ansible-playbook -i inventory.ini ./Ansible/worker.yml
