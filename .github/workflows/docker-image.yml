@@ -1,73 +1,73 @@
-name: Build, Push Docker Image & Deploy Kubernetes Cluster
+# name: Build, Push Docker Image & Deploy Kubernetes Cluster
 
-on:
-  push:
-    branches:
-      - main
+# on:
+#   push:
+#     branches:
+#       - main
 
-env:
-  DOCKER_IMAGE: web-application
-  DOCKER_REGISTRY: docker.io
+# env:
+#   DOCKER_IMAGE: web-application
+#   DOCKER_REGISTRY: docker.io
 
-jobs:
+# jobs:
 
-  build-and-push:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
+#   build-and-push:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout source code
+#         uses: actions/checkout@v4
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+#       - name: Log in to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_USERNAME }}
+#           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build Docker image
-        working-directory: ./app
-        run: docker build -t $DOCKER_IMAGE:latest .
+#       - name: Build Docker image
+#         working-directory: ./app
+#         run: docker build -t $DOCKER_IMAGE:latest .
 
-      - name: Tag and Push Docker image
-        run: |
-          docker tag $DOCKER_IMAGE:latest ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
+#       - name: Tag and Push Docker image
+#         run: |
+#           docker tag $DOCKER_IMAGE:latest ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
+#           docker push ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
 
-  deploy-terraform:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-    outputs:
-      master_ip: ${{ steps.tf_output.outputs.master_ip }}
-      worker_ips: ${{ steps.tf_output.outputs.worker_ips }}
-    steps:
-      - name: Checkout Terraform code
-        uses: actions/checkout@v4
+#   deploy-terraform:
+#     needs: build-and-push
+#     runs-on: ubuntu-latest
+#     env:
+#       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#       AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+#     outputs:
+#       master_ip: ${{ steps.tf_output.outputs.master_ip }}
+#       worker_ips: ${{ steps.tf_output.outputs.worker_ips }}
+#     steps:
+#       - name: Checkout Terraform code
+#         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+#       - name: Setup Terraform
+#         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Init
-        working-directory: ./Terraform
-        run: terraform init
+#       - name: Terraform Init
+#         working-directory: ./Terraform
+#         run: terraform init
 
-      # Optional: import if resources already exist
-      # - name: Terraform Import Resources
-      #   working-directory: ./Terraform
-      #   run: |
-      #     terraform import aws_key_pair.mykeyname mykeyname || echo "Key pair already imported"
-      #     terraform import aws_iam_instance_profile.ec2_cloudwatch_profile ec2_cloudwatch_profile || echo "Instance profile already imported"
-      #     terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "IAM role already imported"
+#       # Optional: import if resources already exist
+#       # - name: Terraform Import Resources
+#       #   working-directory: ./Terraform
+#       #   run: |
+#       #     terraform import aws_key_pair.mykeyname mykeyname || echo "Key pair already imported"
+#       #     terraform import aws_iam_instance_profile.ec2_cloudwatch_profile ec2_cloudwatch_profile || echo "Instance profile already imported"
+#       #     terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "IAM role already imported"
 
-      - name: Terraform Apply
-        working-directory: ./Terraform
-        run: terraform apply -auto-approve
+#       - name: Terraform Apply
+#         working-directory: ./Terraform
+#         run: terraform apply -auto-approve
 
-      - name: Capture Terraform Outputs
-        id: tf_output
-        working-directory: ./Terraform
-        run: |
-          echo "master_ip=$(terraform output -raw master_public_ip)" >> "$GITHUB_OUTPUT"
-          echo "worker_ips=$(terraform output -json worker_public_ips)" >> "$GITHUB_OUTPUT"
+#       - name: Capture Terraform Outputs
+#         id: tf_output
+#         working-directory: ./Terraform
+#         run: |
+#           echo "master_ip=$(terraform output -raw master_public_ip)" >> "$GITHUB_OUTPUT"
+#           echo "worker_ips=$(terraform output -json worker_public_ips)" >> "$GITHUB_OUTPUT"
