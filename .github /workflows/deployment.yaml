@@ -7,44 +7,33 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: web-application
-  DOCKER_REGISTRY: docker.io
+  DOCKER_IMAGE: web-application-gitaction
 
 jobs:
- 
+
   build-and-push:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Build Docker image
-        working-directory: ./k8Cluster/app
-        run: docker build -t $DOCKER_IMAGE:latest .
 
-      - name: Tag and Push Docker image
+      - name: Create dynamic ECR if not exists
+        id: ecr_dynamic
         run: |
-          docker tag $DOCKER_IMAGE:latest ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/$DOCKER_IMAGE:latest
+          aws ecr describe-repositories --repository-names $DOCKER_IMAGE || \
+          aws ecr create-repository --repository-name $DOCKER_IMAGE
+          ECR_DYNAMIC_URI=$(aws ecr describe-repositories --repository-names $DOCKER_IMAGE --query "repositories[0].repositoryUri" --output text)
+          echo "ECR_DYNAMIC_URI=$ECR_DYNAMIC_URI" >> $GITHUB_OUTPUT
 
   
-  deploy-terraform:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-    outputs:
-      master_ip: ${{ steps.tf_output.outputs.master_ip }}
-      worker_ips: ${{ steps.tf_output.outputs.worker_ips }}
-    steps:
       - name: Checkout Terraform code
         uses: actions/checkout@v3
 
@@ -52,23 +41,50 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init
-        working-directory: ./k8Cluster/Terraform
+        working-directory: ./Terraform
         run: terraform init
 
       - name: Terraform Apply
-        working-directory: ./k8Cluster/Terraform
+        working-directory: ./Terraform
         run: terraform apply -auto-approve
 
-      - name: Get EC2 Public IPs
+      - name: Get Terraform ECR URI and EC2 IPs
         id: tf_output
-        working-directory: ./k8Cluster/Terraform
+        working-directory: ./Terraform
         run: |
-          echo "master_ip=$(terraform output -raw master_public_ip)" >> "$GITHUB_OUTPUT"
-          echo "worker_ips=$(terraform output -json worker_public_ips)" >> "$GITHUB_OUTPUT"
+          TERRAFORM_ECR_URI=$(terraform output -raw ecr_uri)
+          echo "TERRAFORM_ECR_URI=$TERRAFORM_ECR_URI" >> "$GITHUB_OUTPUT"
+          MASTER_IP=$(terraform output -raw master_public_ip)
+          echo "MASTER_IP=$MASTER_IP" >> "$GITHUB_OUTPUT"
+          WORKER_IPS=$(terraform output -json worker_public_ips)
+          echo "WORKER_IPS=$WORKER_IPS" >> "$GITHUB_OUTPUT"
 
+
+      - name: Log in to both ECRs
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+            docker login --username AWS --password-stdin ${{ steps.ecr_dynamic.outputs.ECR_DYNAMIC_URI }}
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+            docker login --username AWS --password-stdin ${{ steps.tf_output.outputs.TERRAFORM_ECR_URI }}
+
+   
+      - name: Build Docker image
+        working-directory: ./app
+        run: docker build -t $DOCKER_IMAGE:latest .
+
+ 
+      - name: Push to dynamic ECR
+        run: |
+          docker tag $DOCKER_IMAGE:latest ${{ steps.ecr_dynamic.outputs.ECR_DYNAMIC_URI }}:latest
+          docker push ${{ steps.ecr_dynamic.outputs.ECR_DYNAMIC_URI }}:latest
+
+      - name: Push to Terraform ECR
+        run: |
+          docker tag $DOCKER_IMAGE:latest ${{ steps.tf_output.outputs.TERRAFORM_ECR_URI }}:latest
+          docker push ${{ steps.tf_output.outputs.TERRAFORM_ECR_URI }}:latest
 
   ansible_deploy:
-    needs: deploy-terraform
+    needs: build-and-push
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -94,10 +110,9 @@ jobs:
       - name: Create Inventory
         run: |
           echo "[master]" > inventory
-          echo "${{ needs.deploy-terraform.outputs.master_ip }} ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
-          echo "" >> inventory
+          echo "${{ steps.tf_output.outputs.MASTER_IP }} ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
           echo "[workers]" >> inventory
-          for ip in $(echo '${{ needs.deploy-terraform.outputs.worker_ips }}' | jq -r '.[]'); do
+          for ip in $(echo '${{ steps.tf_output.outputs.WORKER_IPS }}' | jq -r '.[]'); do
             echo "$ip ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory
           done
 
@@ -117,12 +132,10 @@ jobs:
 
       - name: Run Master Script via SSH
         run: |
-          ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.deploy-terraform.outputs.master_ip }} 'bash -s' < ./Ansible/master.sh
+          ssh -i ~/.ssh/id_rsa ec2-user@${{ steps.tf_output.outputs.MASTER_IP }} 'bash -s' < ./Ansible/master.sh
 
-     
-      - name: Run workerscript Script via SSH
+      - name: Run Worker Script via SSH
         run: |
-          ssh -i ~/.ssh/id_rsa ec2-user@${{ needs.deploy-terraform.outputs.worker_ips }} 'bash -s' < ./Ansible/worker.sh
-
-     
-  
+          for ip in $(echo '${{ steps.tf_output.outputs.WORKER_IPS }}' | jq -r '.[]'); do
+            ssh -i ~/.ssh/id_rsa ec2-user@$ip 'bash -s' < ./Ansible/worker.sh
+          done

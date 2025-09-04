@@ -15,3 +15,7 @@ output "kubeadm_join_command" {
   description = "Command to join worker nodes to the master"
   value       = "kubeadm join ${aws_instance.k8s_master.private_ip}:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>"
 }
+
+output "ecr_uri" {
+  value = aws_ecr_repository.my_ecr_repo.repository_url
+}
