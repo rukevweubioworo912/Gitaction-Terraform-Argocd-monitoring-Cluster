@@ -11,7 +11,7 @@ env:
 
 jobs:
 
-  build-and-push:
+  terraform-and-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code
@@ -23,6 +23,13 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+      - name: Terraform Import Existing Resources
+        run: |
+          terraform init
+          terraform import aws_key_pair.mykeyname mykeyname || echo "Key pair exists"
+          terraform import aws_ecr_repository.my_ecr_repo my-ecr-repo || echo "ECR exists"
+          terraform import aws_iam_role.ec2_cloudwatch_role ec2_cloudwatch_role || echo "IAM role exists"
+
 
 
       - name: Create dynamic ECR if not exists
@@ -68,6 +75,13 @@ jobs:
             docker login --username AWS --password-stdin ${{ steps.tf_output.outputs.TERRAFORM_ECR_URI }}
 
    
+  dockerbuild-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3  
+
+        
       - name: Build Docker image
         working-directory: ./app
         run: docker build -t $DOCKER_IMAGE:latest .
