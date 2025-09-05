@@ -36,6 +36,7 @@ This setup addresses the challenges of manual Kubernetes management by automatin
 
 
 ## CI/CD:
+![GITACTION](https://github.com/rukevweubioworo912/Gitaction-Terraform-Argocd-monitoring-Cluster/blob/main/picture/Screenshot%20(2150).png)
 - GitHub Actions automates Terraform provisioning and cluster setup.
 - Deployment: ArgoCD on the master node syncs manifests from a GitHub repository.
 - Monitoring and Logging
