@@ -101,6 +101,9 @@ variable "ami_id" {
 - Master Node Setup
 - SSH into the master node:ssh -i <key.pem> ec2-user@<master-public-ip>
 - Run the master setup script (scripts/master-setup.sh):chmod +x scripts/master-setup.sh
+
+
+![CLUSTER](https://github.com/rukevweubioworo912/Gitaction-Terraform-Argocd-monitoring-Cluster/blob/main/picture/Screenshot%20(2156).png)
 ```
 Example master-setup.sh:#!/bin/bash
 sudo apt update && sudo apt install -y docker.io kubelet kubeadm kubectl
