@@ -104,6 +104,7 @@ variable "ami_id" {
 
 
 ![CLUSTER](https://github.com/rukevweubioworo912/Gitaction-Terraform-Argocd-monitoring-Cluster/blob/main/picture/Screenshot%20(2156).png)
+![CLUSTER](https://github.com/rukevweubioworo912/Gitaction-Terraform-Argocd-monitoring-Cluster/blob/main/picture/Screenshot%20(2160).png)
 ```
 Example master-setup.sh:#!/bin/bash
 sudo apt update && sudo apt install -y docker.io kubelet kubeadm kubectl
@@ -134,6 +135,8 @@ Verify the cluster:kubectl get nodes
 4.3 Copy kubeconfig
 - Copy the kubeconfig file to your local machine:
 - scp -i <key.pem> ec2-user@<master-public-ip>:~/.kube/config ~/.kube/config
+
+
 
 5. Deploy CloudWatch for Logging
 - CloudWatch is configured on the master node to collect logs.
