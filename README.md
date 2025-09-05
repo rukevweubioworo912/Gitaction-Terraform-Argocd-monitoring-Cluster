@@ -43,7 +43,7 @@ This setup addresses the challenges of manual Kubernetes management by automatin
 - Grafana on worker nodes visualizes metrics.
 - CloudWatch on the master node collects logs.
 
-![Architecture Diagram]()
+![Architecture Diagram](https://github.com/rukevweubioworo912/Gitaction-Terraform-Argocd-monitoring-Cluster/blob/main/Untitled%20Diagram%20(1).jpg)
 
 ## Project Setup / Installation Steps
 Follow these steps to reproduce the project from scratch. Ensure you have a
