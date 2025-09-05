@@ -178,6 +178,7 @@ Start the CloudWatch agent:sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-clou
 - Configure ArgoCD to sync with your GitHub repository:
 - Create an ArgoCD application manifest (argocd-apps/app.yaml)
 -
+![ARGOCD](https://github.com/rukevweubioworo912/Gitaction-Terraform-Argocd-monitoring-Cluster/blob/main/picture/Screenshot%20(2177).png)
 ```
 apiVersion: argoproj.io/v1alpha1
 kind: Application
